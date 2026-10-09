@@ -1,3 +1,4 @@
+# на русском
 # lua-testy-love
 
 Форк [lua-testy](https://github.com/siffiejoe/lua-testy) с поддержкой
@@ -801,5 +802,716 @@ MIT (как и оригинал [lua-testy](https://github.com/siffiejoe/lua-tes
 ## Ссылки
 
 - Оригинал: [siffiejoe/lua-testy](https://github.com/siffiejoe/lua-testy)
+- Код: [Deepseek.com](https://deepseek.com)
 - LÖVE2D: [love2d.org](https://love2d.org/)
 - TAP: [testanything.org](http://testanything.org/)
+
+
+# In English
+
+# lua-testy-love
+
+A fork of [lua-testy](https://github.com/siffiejoe/lua-testy) with
+[LÖVE2D](https://love2d.org/) support.
+
+A minimalist unit testing framework for Lua and LÖVE games. Tests are
+written **inside** modules as local functions prefixed with `test_`,
+collected automatically via `debug` hooks, and do not alter a module's
+public API.
+
+**What this fork adds:**
+
+- run tests in plain Lua (**standalone**) — same as the original;
+- run tests **inside LÖVE** — headless and windowed;
+- **mocks** for `love.*` (`timer`, `graphics`, `audio`, `filesystem`,
+  `window`, `event`);
+- **SKIP** status (`testy_skip(reason)` and the `-- testy:requires love`
+  marker);
+- extended CLI (`--mock-love`, `--no-extra`, `-r`, `-t`, `-v`, `-h`,
+  `--test`, `--window`).
+
+The original philosophy is preserved: **minimalism**, **pure Lua**,
+**tests inside modules**, **no dependencies** (except LÖVE for the LÖVE
+mode).
+
+---
+
+## Contents
+
+1. [Requirements](#requirements)
+2. [Installing into your game](#installing-into-your-game)
+3. [Writing tests](#writing-tests)
+4. [Running tests](#running-tests)
+5. [SKIP and markers](#skip-and-markers)
+6. [Mocks for `love.*`](#mocks-for-love)
+7. [CLI](#cli)
+8. [TAP output and exit codes](#tap-output-and-exit-codes)
+9. [CI (GitHub Actions, GitLab CI)](#ci)
+10. [Framework structure](#framework-structure)
+11. [Differences from the original](#differences-from-the-original)
+12. [Limitations](#limitations)
+13. [License](#license)
+
+---
+
+## Requirements
+
+- **Standalone:** Lua 5.1+ (5.1, 5.2, 5.3, 5.4, LuaJIT).
+- **LÖVE mode:** LÖVE 11.x.
+
+No external dependencies.
+
+---
+
+## Installing into your game
+
+> **Important.** Simply copying `testy.lua` and `testy/` into your game's
+> root is **not enough**. You also need to **augment** your `conf.lua`
+> and `main.lua` so LÖVE knows about the test mode.
+
+### Step 1. Copy the framework
+
+Copy **two** items into the **root** of your game:
+your-game/
+├── testy.lua ← copy
+├── testy/ ← copy
+├── conf.lua ← you already have this; augment it
+├── main.lua ← you already have this; augment it
+├── src/ ← your code
+│ ├── player.lua
+│ └── enemy.lua
+└── tests/ ← create this
+└── test_player.lua
+
+text
+
+**Minimum required to work:** `testy.lua` + `testy/`. Without the rest
+of the files, the framework will not work.
+
+**Do not copy:** `examples/`, `tests/`, `module.lua`, `main.lua`,
+`conf.lua` from the fork's repository — these are demo files, not part
+of the framework.
+
+### Step 2. Augment your `conf.lua`
+
+**Do not replace** your `conf.lua` — **add** the `arg` handling so
+LÖVE can start in headless mode with `--test`:
+
+lua
+function love.conf( t )
+  -- ─── Your usual game settings ──────────────────────────────
+  t.window.title = "My Game"
+  t.window.width = 1280
+  t.window.height = 720
+  t.identity = "my_game"
+  -- ...
+
+  -- ─── Add this: test-mode handling ──────────────────────────
+  local test_mode, windowed = false, false
+  for _, a in ipairs( arg or {} ) do
+    if a == "--test"   then test_mode = true end
+    if a == "--window" then windowed  = true end
+  end
+
+  if test_mode and not windowed then
+    t.window = false             -- headless: no window
+    t.modules.joystick = false
+    t.modules.physics = false
+    t.modules.video = false
+  end
+end
+Why: without these lines, love . --test will create a window and
+launch the game as usual, ignoring the flags.
+
+With --window: the window is created, LÖVE runs in windowed mode.
+
+Step 3. Augment your main.lua
+Do not replace your main.lua. Add test-mode handling at the
+beginning of love.load, love.update, and love.draw:
+
+lua
+-- At the very top of main.lua:
+local testy = require( "testy.love" )
+
+function love.load( args )
+  -- ─── Test-mode interception ────────────────────────────────
+  if testy.is_test_mode( args ) then
+    testy.setup( args )
+    return                       -- do not run game logic
+  end
+
+  -- ─── Your usual initialization ─────────────────────────────
+  player = require( "src.player" )
+  enemy  = require( "src.enemy" )
+  -- ...
+end
+
+function love.update( dt )
+  -- ─── Test mode: run tests and exit ─────────────────────────
+  if testy.is_active() then
+    if not testy._tests_done then
+      testy.run()
+      if not testy.is_windowed() then
+        testy.finish()           -- headless: exit immediately
+      end
+    end
+    return                       -- do not run game logic
+  end
+
+  -- ─── Your game logic ───────────────────────────────────────
+  player:update( dt )
+  enemy:update( dt )
+  -- ...
+end
+
+function love.draw()
+  -- ─── Windowed test mode ────────────────────────────────────
+  if testy.is_active() and testy.is_windowed() then
+    love.graphics.print( "Running tests...", 10, 10 )
+    if testy._tests_done then
+      testy.finish()             -- exit after the first frame
+    end
+    return                       -- do not draw the game
+  end
+
+  -- ─── Your drawing ──────────────────────────────────────────
+  player:draw()
+  enemy:draw()
+  -- ...
+end
+Why:
+
+without --test the game runs as usual;
+
+with --test the game is not launched — only tests;
+
+in headless mode, tests run in the first love.update and LÖVE exits;
+
+in windowed mode, tests run, the window flashes for one frame, and
+LÖVE exits on the first love.draw.
+
+If you have multiple files with love.load/love.update — call
+them only when testy.is_active() returns false.
+
+Step 4. Create the tests/ directory
+text
+your-game/
+└── tests/
+    ├── test_player.lua
+    └── test_enemy.lua
+Example tests/test_player.lua:
+
+lua
+local player = require( "src.player" )   -- path from the game root
+
+local function test_jump()
+  assert( player.jump() == 10 )
+end
+
+local function test_take_damage()
+  player.hp = 100
+  player:take_damage( 30 )
+  assert( player.hp == 70 )
+end
+
+return {}
+The file must return a value (a table, a module, anything) — but
+the return is mandatory, otherwise tests will not be collected
+(see "Limitations").
+
+Step 5. Run tests
+bash
+cd your-game
+
+# Headless, all tests in tests/
+love . --test -r tests/
+
+# With a window (visual debugging)
+love . --test --window -r tests/
+
+# TAP output (for CI)
+love . --test -r -t tests/
+
+# A single file
+love . --test tests/test_player.lua
+
+# Normal game launch (without tests)
+love .
+Troubleshooting
+Symptom	Cause	Fix
+love . --test runs the game instead of tests	main.lua lacks the testy.is_test_mode(args) check	Step 3
+module 'testy.love' not found	testy/ is not in the game root	Step 1
+A window appears with --test but without --window	conf.lua does not read arg	Step 2
+No window appears with --test --window	conf.lua does not check for --window	Step 2
+0 tests (0 ok, ...)	Tests in the file do not return a value, or the file is not found	Check for return at the end of the test file
+dofile("testy.lua") fails	LÖVE cannot see testy.lua via io.open	Run from the game root: cd your-game && love . --test ...
+Writing tests
+Tests are local functions prefixed with test_. They are collected
+automatically when the file is loaded. The module's public API is
+not altered.
+
+Option 1. Tests inside modules (original approach)
+lua
+-- src/player.lua
+local M = {}
+
+function M.jump()
+  return 10
+end
+
+-- Tests are local, not visible from outside.
+local function test_jump()
+  assert( M.jump() == 10 )
+  assert( M.jump() ~= 5 )
+end
+
+return M
+Pros: tests next to the code. Cons: tests end up in production
+builds (harmless — local functions are collected by the GC).
+
+Run:
+
+bash
+love . --test src/player.lua
+Option 2. Tests separately, in tests/ (recommended for games)
+lua
+-- tests/test_player.lua
+local player = require( "src.player" )
+
+local function test_jump()
+  assert( player.jump() == 10 )
+end
+
+return {}
+Pros: tests are separated from production code. Cons: you must
+explicitly require the modules.
+
+Run:
+
+bash
+love . --test -r tests/
+Assertions
+Inside tests, use:
+
+assert( cond, msg ) — standard, but intercepted by the framework;
+
+testy_assert( cond, msg ) — also works in helper functions and
+callbacks.
+
+Outside tests, assert behaves as usual.
+
+Helper example:
+
+lua
+local function assert_equal( x, y, msg )
+  testy_assert( x == y, msg or ( "expected " .. tostring(y) ..
+                                 ", got " .. tostring(x) ) )
+end
+
+local function test_example()
+  assert_equal( player.hp, 100 )
+end
+testy.extra
+If testy.extra is available (it lives next to testy/), helper
+functions are loaded automatically:
+
+is( x, y ) — flexible comparison (with predicates, NaN, nested
+tables);
+
+is_eq( x, y ) — deep comparison;
+
+raises( p, f, ... ) — asserts that f(...) throws;
+
+returns( p, f, ... ) — asserts returned values;
+
+yields( f, ... ) — asserts coroutine behavior;
+
+iterates( chks, f, s ) — asserts iterators.
+
+Disable with: the --no-extra flag.
+
+Example:
+
+lua
+local function test_is_eq()
+  assert( is_eq( { a = 1, b = { 2 } }, { a = 1, b = { 2 } } ) )
+end
+
+local function test_raises()
+  local function boom() error( "oops", 0 ) end
+  assert( raises( "oops", boom ) )
+end
+Running tests
+Standalone (plain Lua, no LÖVE)
+bash
+lua testy.lua your-module.lua
+lua testy.lua tests/test_player.lua tests/test_enemy.lua
+lua testy.lua -r tests/                  # recursive
+lua testy.lua -t tests/test_player.lua   # TAP
+lua testy.lua --mock-love your-module.lua
+lua testy.lua --no-extra your-module.lua
+lua testy.lua -h
+Pros: fast, works without LÖVE, good for pure logic.
+
+Limitation: tests that require love.* will not run in standalone
+mode (they are skipped with SKIP if the -- testy:requires love marker
+is present). With the --mock-love flag, they run against mocks.
+
+LÖVE headless
+bash
+love . --test your-module.lua
+love . --test -r tests/
+love . --test -t tests/test_player.lua
+No window is created (t.window = false).
+
+Mocks for love.* are installed automatically.
+
+LÖVE exits by itself after the run.
+
+LÖVE windowed
+bash
+love . --test --window your-module.lua
+A window is created, real love.* is used.
+
+The window flashes for one frame, then LÖVE exits.
+
+Mocks are not installed — tests run against real love.graphics,
+love.audio, etc.
+
+Write tests so that they work in both headless and windowed modes.
+For example, pcall( love.graphics.newImage, "no_such.png" ) returns
+false in both modes (in the mock and in real LÖVE).
+
+SKIP and markers
+Explicit SKIP
+lua
+local function test_not_ready()
+  testy_skip( "not implemented yet" )
+  -- code below will not run
+end
+Output:
+
+text
+not ready ('tests/test_player.lua')
+SKIP (not implemented yet)
+In TAP:
+
+text
+ok 6 tests/test_player.lua:42 # SKIP not implemented yet
+"Requires LÖVE" marker
+At the top of the file:
+
+lua
+-- testy:requires love
+In standalone mode (without --mock-love), such a file is skipped
+with the SKIP (requires LOVE) note.
+
+In LÖVE mode and with the --mock-love flag, tests run.
+
+Conditional SKIP
+lua
+local compat = require( "testy.compat" )
+
+local function test_needs_love()
+  compat.skip_if_no_love()   -- throws SKIP if love == nil
+  assert( love ~= nil )
+end
+Mocks for love.*
+Mocks are installed in LÖVE headless and in standalone with
+--mock-love. In LÖVE windowed and without --mock-love, real
+love.* is used.
+
+love.timer
+getTime() — non-mutating, returns a fake time;
+
+advance(dt) — explicit time advancement;
+
+getDelta(), getAverageDelta();
+
+getFPS() — fixed at 60;
+
+sleep(sec) — no-op.
+
+lua
+local timer = require( "testy.mocks.timer" )
+timer.install()
+timer.reset()
+local t0 = love.timer.getTime()
+timer.advance( 0.5 )
+local t1 = love.timer.getTime()
+assert( t1 - t0 == 0.5 )
+love.graphics
+newImage(path) — checks the file's existence, errors if missing;
+
+newQuad(...), newFont(size) — mock objects;
+
+draw, print, printf, setColor — spies (record calls);
+
+getWidth/Height — read from love.window;
+
+other methods — no-op.
+
+lua
+local graphics = require( "testy.mocks.graphics" )
+graphics.install()
+graphics.reset()
+love.graphics.draw( "sprite", 10, 20 )
+local calls = graphics.get_draw_calls()
+assert( #calls == 1 )
+assert( calls[1][1] == "sprite" )
+love.filesystem
+load(path) — reads via io, strips shebang;
+
+read(path), exists(path), getInfo(path) — via io;
+
+does not overwrite the real love.filesystem if LÖVE is
+initialized.
+
+love.audio
+newSource(path) — checks the file's existence;
+
+play — spy;
+
+stop, pause — no-op.
+
+lua
+local audio = require( "testy.mocks.audio" )
+audio.install()
+audio.reset()
+local src = love.audio.newSource( "testy.lua", "static" )
+love.audio.play( src )
+assert( #audio.get_play_calls() == 1 )
+love.window
+setMode(w, h, flags) — mutates state;
+
+getMode() — returns three values (w, h, flags), like LÖVE;
+
+isVisible, setTitle, hasFocus — stubs.
+
+love.event
+quit(code) — spy: records the call, does not exit the process;
+
+uninstall() — restores the original love.event.quit.
+
+lua
+local event = require( "testy.mocks.event" )
+event.install()
+event.reset()
+love.event.quit( 1 )
+assert( event.calls()[1] == 1 )
+Managing all mocks
+lua
+local mocks = require( "testy.mocks.init" )
+mocks.install()        -- install all mocks
+mocks.reset_all()      -- reset state
+mocks.uninstall_all()  -- remove mocks
+Installation order: timer, window, graphics, audio,
+filesystem, event.
+
+CLI
+Flag	Description	Where it works
+-r	Recursive directory traversal	Lua + LÖVE
+-t	TAP output to stdout	Lua + LÖVE
+-v	Verbose	Lua + LÖVE
+-h, --help	Help	Lua + LÖVE
+--mock-love	Install love.* mocks	Lua only
+--no-extra	Do not load testy.extra	Lua + LÖVE
+--test	LÖVE mode (only love . --test)	LÖVE only
+--window	LÖVE windowed (only love . --test --window)	LÖVE only
+Grammar:
+
+text
+testy.lua [flags] <files> [flags] <files> ...
+Flags may appear before or after file names.
+
+Examples:
+
+bash
+lua testy.lua -r tests/                  # recursive, all .lua
+lua testy.lua -r -t tests/               # recursive + TAP
+lua testy.lua --mock-love tests/x.lua    # with mocks
+love . --test -r tests/                  # LÖVE headless
+love . --test --window -r tests/         # LÖVE windowed
+TAP output and exit codes
+With the -t flag, output is produced in
+TAP format:
+
+text
+# jump ('tests/test_player.lua')
+ok 1 tests/test_player.lua:5
+# take damage ('tests/test_player.lua')
+ok 2 tests/test_player.lua:10
+1..2
+SKIP in TAP:
+
+text
+ok 3 tests/test_player.lua:20 # SKIP requires LOVE
+Exit codes:
+
+0 — all tests passed, or there are SKIPs;
+
+1 — there is a FAIL or ERROR;
+
+in TAP mode (-t) exit code is always 0 (per the TAP spec).
+
+Check the exit code locally:
+
+bash
+love . --test -r tests/
+echo "exit: $?"
+With prove:
+
+bash
+prove --exec "lua testy.lua -t" tests/test_player.lua
+CI
+To run tests in CI you need Xvfb — a virtual display — because LÖVE
+requires an X server, even in headless mode.
+
+GitHub Actions
+yaml
+# .github/workflows/tests.yml
+name: Tests
+on: [ push, pull_request ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install LÖVE and Xvfb
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y love xvfb libgl1-mesa-dri
+
+      - name: Run tests
+        run: |
+          xvfb-run -a --server-args="-screen 0 1280x720x24" \
+            love . --test -r -t tests/
+
+      - name: Standalone tests (without LÖVE)
+        run: |
+          lua testy.lua -r -t tests/ || true
+libgl1-mesa-dri is needed if the CI has no GPU — it enables
+software OpenGL (llvmpipe).
+
+GitLab CI
+yaml
+# .gitlab-ci.yml
+test:
+  image: ubuntu:latest
+  before_script:
+    - apt-get update
+    - apt-get install -y love xvfb libgl1-mesa-dri lua5.1
+  script:
+    - xvfb-run -a --server-args="-screen 0 1280x720x24"
+        love . --test -r -t tests/
+    - lua testy.lua -r -t tests/
+Running the CI command locally
+bash
+xvfb-run -a --server-args="-screen 0 1280x720x24" \
+  love . --test -r -t tests/
+Expect: TAP lines ok N ... printed, exit code 0.
+
+Makefile
+makefile
+test:
+	love . --test -r -t tests/
+
+test-windowed:
+	love . --test --window -r tests/
+
+test-standalone:
+	lua testy.lua -r -t tests/
+
+ci:
+	xvfb-run -a --server-args="-screen 0 1280x720x24" \
+		love . --test -r -t tests/
+
+.PHONY: test test-windowed test-standalone ci
+Framework structure
+This is the internal structure of the framework you copy into your
+game:
+
+text
+testy.lua                 # CLI + patch (SKIP, cli.parse)
+testy/
+├── cli.lua               # argument parser + recursive traversal
+├── compat.lua            # skip_if_no_love, skip, has_love
+├── extra.lua             # is, is_eq, raises, returns, yields, iterates
+├── love.lua              # LÖVE wrapper (setup, run, finish)
+├── runner.lua            # common runner (delegates to testy.lua)
+└── mocks/
+    ├── init.lua          # installs all mocks
+    ├── timer.lua
+    ├── window.lua
+    ├── graphics.lua
+    ├── audio.lua
+    ├── filesystem.lua
+    └── event.lua
+testy.lua does not work without testy/. testy/ does not work
+without testy.lua. Copy them together.
+
+Differences from the original
+Feature	lua-testy	lua-testy-love
+Runs in plain Lua	✅	✅
+Test syntax (test_, assert)	✅	✅
+TAP output	✅	✅
+testy.extra	✅	✅
+Recursive traversal -r	✅	✅
+SKIP status	❌	✅
+-- testy:requires love marker	❌	✅
+Runs inside LÖVE	❌	✅
+Mocks for love.*	❌	✅
+LÖVE headless	❌	✅
+LÖVE windowed	❌	✅
+--mock-love flag	❌	✅
+The public API of testy.lua is preserved. The patch only affects
+argument parsing (delegated to testy/cli.lua) and SKIP handling.
+
+Limitations
+Mocks for love.graphics do not emulate rendering. You cannot
+verify pixels in headless mode. For visual regression, use
+Xvfb + screenshots (outside the framework's scope).
+
+Mocks for love.audio do not play sound. Only API calls are
+verified (spies), not the actual audio.
+
+love.timer in the mock is not synchronized with real time.
+Use advance(dt) for deterministic time.
+
+love.filesystem in the mock uses io, not LÖVE's virtual
+filesystem. Paths are real, relative to the CWD.
+
+Headless in LÖVE is a hidden window (t.window = false), not
+true headless. The GPU is still initialized. For true headless,
+use standalone mode.
+
+In windowed mode mocks are not installed. Tests run against
+real love.*. Write tests so they work in both modes.
+
+love.filesystem.exists is deprecated in LÖVE 11.5. When used
+in LÖVE mode, LÖVE emits a warning. Use getInfo for cleanliness
+or accept the warning.
+
+A test file must return a value (usually return {} or
+return M). Without a return, the framework will not collect
+tests from the file.
+
+-r <directory> uses io.popen("ls ...") — works on Linux
+and macOS, does not work on Windows. On Windows, list files
+explicitly or use standalone mode via testy/cli.lua.
+
+Mocks do not cover all of LÖVE's API. Extend
+testy/mocks/*.lua as needed.
+
+License
+MIT (same as the original
+lua-testy).
+
+Links
+Original: siffiejoe/lua-testy
+Code: deepseek.com
+LÖVE2D: love2d.org
+
+
